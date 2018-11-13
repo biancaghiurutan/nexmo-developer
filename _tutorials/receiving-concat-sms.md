@@ -1,0 +1,398 @@
+---
+title: Receiving Concatenated SMS
+products: messaging/sms
+description: If an inbound SMS exceeds the maximum length allowed for a single SMS, it is split into parts. It is then up to you to reassemble those parts to show the full message. This tutorial shows you how.
+languages:
+    - Node
+---
+
+
+# Receiving Concatenated SMS
+
+SMS messages that [exceed a certain length](/messaging/sms/guides/concatenation-and-encoding) are split into multiple SMS and transmitted seperately. The receiver must gather all the constituent parts and reassemble them to display the full message.
+
+When you use the SMS API to receive [inbound SMS](/messaging/sms/guides/inbound-sms) that might be longer than the byte-length allowed for a single SMS, you must check to see if the messages delivered to your [webhook](/concepts/guides/webhooks) are standalone or just one part of a multi-part SMS. If there are multiple parts to the message, you must reassemble them to display the full message text.
+
+This tutorial shows you how.
+
+## In this tutorial
+
+In this tutorial, you create a simple Node.js application using the Express framework that receives inbound SMS via a webhook and determines whether the message is a single-part or multi-part SMS.
+
+If the incoming SMS is multi-part, the application waits until it has received all the message parts and then combines them in the right order to display to the user.
+
+To achieve this, you perform the following steps:
+
+1. [Create the project](#create-the-project) - create a Node.js/Express application
+2. [Expose your application to the Internet](#expose-your-application-to-the-internet) - use `ngrok` to enable Nexmo to access your application via a webhook
+4. [Create the basic application](#create-the-basic-application) - build an application with a webhook to receive inbound SMS
+5. [Register your webhook with Nexmo](#register-your-webhook-with-nexmo) - tell Nexmo's servers about your webhook
+6. [Send a test SMS](#send-a-test-sms) - ensure that your webhook can receive incoming SMS
+7. [Handle multi-part SMS](#handle-multi-part-sms) - process the individual message parts of a larger SMS
+8. [Test receipt of a concatenated SMS](#test-receipt-of-a-concatenated-sms) - see it in action!
+
+## Prerequisites
+
+To complete the tutorial, you need:
+
+* A [Nexmo account](https://dashboard.nexmo.com/sign-up) - for your API key and secret
+* A [virtual number](/numbers/guides/numbers) - at which to receive inbound SMS
+* [ngrok](https://ngrok.com/) - to make your development web server accessible to Nexmo's servers over the Internet
+
+## Create the project
+Make a directory for your application, `cd` into the directory and then use the Node.js package manager `npm` to create a `package.json` file for your application's dependencies:
+
+```sh
+$ mkdir myapp
+$ cd myapp
+$ npm init
+```
+
+Press [Enter] to accept each of the defaults.
+
+Then, install the [express](https://expressjs.com) web application framework and the [body-parser](https://www.npmjs.com/package/body-parser) packages:
+
+```sh
+$ npm install express body-parser --save
+```
+
+## Expose your application to the Internet
+
+When the SMS API receives an SMS destined for one of your virtual numbers, it alerts your application via a [webhook](/concepts/guides/webhooks). The webhook provides a mechanism for Nexmo's servers to communicate with yours.
+
+For your application to be accessible to Nexmo's servers, it must be publicly available on the Internet. A simple way to achieve this during development and testing is to use [ngrok](https://ngrok.com), a service that exposes local servers to the public Internet over secure tunnels. See [this blog post](https://www.nexmo.com/blog/2017/07/04/local-development-nexmo-ngrok-tunnel-dr/) for more details.
+
+Download and install [ngrok](https://ngrok.com), then start it with the following command:
+
+```sh
+$ ./ngrok http 5000
+```
+
+This creates public URLs (HTTP and HTTPS) for any web site that is running on port 5000 on your local machine.
+
+Use the `ngrok` web interface at <http://localhost:4040> and make a note of the URLs that `ngrok` provides: you need them to complete this tutorial.
+
+## Create the basic application
+
+Create an `index.js` file in your application directory with the following code, which will be our starting point:
+
+```javascript
+const app = require('express')();
+const bodyParser = require('body-parser');
+
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+
+app
+    .route('/webhooks/inbound-sms')
+    .get(handleInboundSms)
+    .post(handleInboundSms);
+
+function handleInboundSms(request, response) {
+    const params = Object.assign(request.query, request.body);
+
+    console.log('Inbound SMS received');
+    
+    // Send OK status
+    response.status(204).send();
+}
+
+app.listen('5000');
+```
+
+This code does the following:
+
+* Initializes the dependencies (the `express` framework and `body-parser` for parsing [POST] requests).
+* Registers a `/webhooks/inbound-sms` route with Express that accepts both [GET] and [POST] requests. This is the webhook that Nexmo's APIs will use to communicate with our application when one of our virtual numbers receives an SMS.
+* Creates a handler function for the route called `handleInboundSms()` that displays a message telling us that we have received an inbound SMS and returns an HTTP `success` response to Nexmo's APIs. This last step is important, otherwise Nexmo will continue trying to deliver the SMS until it times out.
+* Runs the application server on port 5000.
+
+## Register your webhook with Nexmo
+
+Now that you have created your webhook, you need to tell Nexmo where it is. Log into your [Nexmo account dashboard](https://dashboard.nexmo.com/) and visit the [settings](https://dashboard.nexmo.com/settings) page.
+
+In your application, the webhook is located at `/webhooks/inbound-sms`. If you are using Ngrok, the full webhook endpoint you need to configure resembles `https://demo.ngrok.io/webhooks/inbound-sms`, where `demo` is the subdomain provided by Ngrok (typically something like `0547f2ad`).
+
+Enter your webhook endpoint in the field labeled **Webhook URL for Inbound Message** and click the [Save changes] button.
+
+```screenshot
+script: app/screenshots/webhook-url-for-inbound-message.js
+image: public/assets/screenshots/smsInboundWebhook.png
+```
+
+Now, if any of your virtual numbers receive an SMS, Nexmo will call that webhook endpoint with the message details.
+
+## Send a test SMS
+
+1. Create a new file in your application directory called `test.js`. Enter the following code, replacing `NEXMO_API_KEY` and `NEXMO_API_SECRET` with your own API key and secret from the [dashboard](https://dashboard.nexmo.com/) and `TO_NUMBER` with one of your virtual numbers:
+
+    ```javascript
+    const Nexmo = require('nexmo');
+
+    const nexmo = new Nexmo({
+    apiKey: 'NEXMO_API_KEY',
+    apiSecret: 'NEXMO_API_SECRET'
+    })
+
+    const from = 'TEST-NEXMO';
+    const to = 'TO_NUMBER';
+    const text = 'This is a short text message.';
+
+    nexmo.message.sendSms(from, to, text);
+    ```
+
+2. Install the Nexmo Node.js REST client library that `test.js` requires:
+
+    ```sh
+    npm install nexmo --save
+    ```
+
+3. Open a new terminal window and run the `index.js` file so that it listens for incoming SMS:
+
+    ```sh
+    node index.js
+    ```
+
+4. In another terminal window, send a test SMS by running the `test.js` file:
+
+    ```sh
+    node test.js
+    ```
+
+    If everything is configured correctly you should receive a `Inbound SMS received` message in the terminal window running `index.js`.
+
+Now, let's write some code to parse the incoming SMS to see what the message contains.
+
+1. Press [Ctrl+C] to terminate the running `index.js` application.
+
+2. Create a new function in `index.js` called `displaySms()`:
+
+    ```javascript
+    function displaySms(msisdn, text) {
+        console.log('FROM: ' + msisdn);
+        console.log('MESSAGE: ' + text);
+        console.log('---');
+    }
+    ```
+
+3. Also in `index.js` and just before your code sends the `204` response, add a call to `displaySms()` using the following parameters:
+
+    ```javascript
+    displaySms(params.msisdn, params.text);
+    ```
+
+4. Restart `index.js` and then run `test.js` again. This time, you should see the following in the terminal window running `index.js`:
+
+    ```sh
+    Inbound SMS received
+    FROM: TEST-NEXMO
+    MESSAGE: This is a short text message.
+    ```
+
+5. Keep `index.js` running, but modify `test.js` to send a message that is considerably longer than a single SMS allows. For example, the first sentence from Dickens' "A Tale of Two Cities":
+
+    ```javascript
+    const from = 'TEST-NEXMO';
+    const to = 'TO_NUMBER';
+    const text = 'It was the best of times, it was the worst of times, it was the age of wisdom, it was the age of foolishness, it was the epoch of belief, it was the epoch of incredulity, it was the season of Light, it was the season of Darkness, it was the spring of hope, it was the winter of despair, we had everything before us, we had nothing before us, we were all going direct to Heaven, we were all going direct the other way ... in short, the period was so far like the present period, that some of its noisiest authorities insisted on its being received, for good or for evil, in the superlative degree of comparison only.'
+    ```
+
+6. Run `test.js` again, and check the output in the terminal window that is running `index.js`. You should see something that resembles the following:
+
+    ```
+    ---
+    Inbound SMS received
+    FROM: TEST-NEXMO
+    MESSAGE: It was the best of times, it was the worst of times, it was the age of wisdom, it was the age of foolishness, it was the epoch of belief, it was the epo
+    ---
+    Inbound SMS received
+    FROM: TEST-NEXMO
+    MESSAGE: ch of incredulity, it was the season of Light, it was the season of Darkness, it was the spring of hope, it was the winter of despair, we had everything
+    ---
+    Inbound SMS received
+    FROM: TEST-NEXMO
+    MESSAGE: e the present period, that some of its noisiest authorities insisted on its being received, for good or for evil, in the superlative degree of compariso
+    ---
+    Inbound SMS received
+    FROM: TEST-NEXMO
+    MESSAGE:  before us, we had nothing before us, we were all going direct to Heaven, we were all going direct the other way ... in short, the period was so far lik
+    ---
+    Inbound SMS received
+    FROM: TEST-NEXMO
+    MESSAGE: n only.
+    ---
+    ```
+
+What happened? The message exceeded the single SMS byte limit and so was sent as multiple SMS messages.
+
+To enable us to present such messages to our users in the format they were intended, we need to detect if an incoming message has been split in this way and then reassemble it from the parts.
+
+> Notice in the above output that the parts did not arrive in the correct order. This is not uncommon so we need to code our webhook to handle this eventuality.
+
+## Handle multi-part SMS
+
+Nexmo passes four special parameters to your webhook when an inbound SMS is concatenated. (They don't appear in the request when the SMS is single-part.) You can use them to reassemble the individual parts into a coherent whole:
+
+* `concat:true` - when the message is concatenated
+* `concat-ref` - a unique reference that enables you to determine which SMS a particular message part belongs to
+* `concat-total` - the total number of parts that comprise the entire SMS
+* `concat-part` - the position of this message part in the whole message, so that you can reassemble the parts in the correct order
+
+### Detect if a message is concatenated
+
+First, you need to detect if a message is concatenated. Modify the `handleInboundSms()` function so that it displays a single-part SMS to the user in the usual way, but performs extra processing for multi-part SMS which you will implement in a later step:
+
+```javascript
+function handleInboundSms(request, response) {
+    const params = Object.assign(request.query, request.body);
+
+    if (params['concat'] === 'true') {
+        // Perform extra processing
+    } else {
+        // Not a concatenated message, so just display it
+        displaySms(params.msisdn, params.text);
+    }   
+    
+    // Send OK status
+    response.status(204).send();
+}
+```
+
+### Store multi-part SMS for later processing
+
+We need to store any inbound SMS that are part of a larger message so that we can process them once we have all the parts.
+
+Declare an array outside of the `handleInboundSms()` function called `concat_sms`. If an incoming SMS is part of a longer message, store it in the array:
+
+```javascript
+let concat_sms = []; // Array of message objects
+
+function handleInboundSms(request, response) {
+    const params = Object.assign(request.query, request.body);
+
+    if (params['concat'] === 'true') {
+        /* This is a concatenated message. Add it to an array
+           so that we can process it later. */
+        concat_sms.push({
+            ref: params['concat-ref'],
+            part: params['concat-part'],
+            from: params.msisdn,
+            message: params.text
+        });
+    } else {
+        // Not a concatenated message, so just display it
+        displaySms(params.msisdn, params.text);
+    }   
+    
+    // Send OK status
+    response.status(204).send();
+}
+```
+
+### Gather all the message parts
+
+Before we even attempt to reassemble the message from its parts, we need to ensure that we have all the parts for a given message reference. Remember that there is no guarantee that all the parts will arrive in the correct order, so it is not simply a matter of checking if `concart-part` equals `concat-total`.
+
+We can do this by filtering the `concat_sms` array to include only those SMS objects that share the same `concat-ref` as the SMS that we have just received. If the length of that filtered array is the same as `concat-total`, then we have all the parts for that message and can then reassemble them:
+
+```javascript
+    if (params['concat'] === 'true') {
+        /* This is a concatenated message. Add it to an array
+           so that we can process it later. */
+        concat_sms.push({
+            ref: params['concat-ref'],
+            part: params['concat-part'],
+            from: params.msisdn,
+            message: params.text
+        });
+
+        /* Do we have all the message parts yet? They might
+           not arrive consecutively. */
+        let parts_for_ref = concat_sms.filter(function (part) {
+            return part.ref == params['concat-ref'];
+        });
+
+        // Is this the last message part for this reference?
+        if (parts_for_ref.length == params['concat-total']) {
+            console.dir(parts_for_ref);
+            processConcatSms(parts_for_ref);
+        }
+    }
+```
+
+### Reassemble the message parts
+
+Now that we have all the message parts but not necessarily in the right order, we can use the `Array.sort()` function to reassemble them in order of `concat-part`. Create the `processConcatSms()` function to do that:
+
+```javascript
+function processConcatSms(all_parts) {
+
+    // Order all the message parts
+    all_parts.sort(function (a, b) {
+        if (Number(a.part) < Number(b.part)) {
+            return -1;
+        } else {
+            return 1;
+        }
+    })
+
+    let concat_message = '';
+
+    // Reassemble the message from the parts
+    for (i = 0; i < all_parts.length; i++) {
+        concat_message += all_parts[i].message;
+    }
+
+    displaySms(all_parts[0].from, concat_message);
+}
+```
+
+## Test receipt of a concatenated SMS
+
+Run `index.js` in one terminal window and then run `test.js` in another.
+
+If you have coded everything correctly then in the `index.js` window you should see the individual message parts arrive. When all the parts have been received, the full message displays:
+
+```
+[ { ref: '08B5',
+    part: '3',
+    from: 'TEST-NEXMO',
+    message: ' before us, we had nothing before us, we were all going direct to Heaven, we were all going direct the other way ... in short, the period was so far lik' },
+  { ref: '08B5',
+    part: '1',
+    from: 'TEST-NEXMO',
+    message: 'It was the best of times, it was the worst of times, it was the age of wisdom, it was the age of foolishness, it was the epoch of belief, it was the epo' },
+  { ref: '08B5', part: '5', from: 'TEST-NEXMO', message: 'n only.' },
+  { ref: '08B5',
+    part: '2',
+    from: 'TEST-NEXMO',
+    message: 'ch of incredulity, it was the season of Light, it was the season of Darkness, it was the spring of hope, it was the winter of despair, we had everything' },
+  { ref: '08B5',
+    part: '4',
+    from: 'TEST-NEXMO',
+    message: 'e the present period, that some of its noisiest authorities insisted on its being received, for good or for evil, in the superlative degree of compariso' } ]
+FROM: TEST-NEXMO
+MESSAGE: It was the best of times, it was the worst of times, it was the age of wisdom, it was the age of foolishness, it was the epoch of belief, it was the epoch of incredulity, it was the season of Light, it was the season of Darkness, it was the spring of hope, it was the winter of despair, we had everything before us, we had nothing before us, we were all going direct to Heaven, we were all going direct the other way ... in short, the period was so far like the present period, that some of its noisiest authorities insisted on its being received, for good or for evil, in the superlative degree of comparison only.
+---
+```
+
+## Conclusion
+
+In this tutorial, you created a simple application that shows you how to reassemble a concatenated SMS from its constituent message parts. You learned about the `concat`, `concat-ref`, `concat-total`, and `concat-part` request parameters to your inbound SMS webhook and how you can use them to determine:
+
+* If an inbound SMS is concatenated 
+* Which message a specific message part belongs to
+* How many message parts comprise the full message
+* The order of a specific message part within the full message
+
+## Where Next?
+
+The following resources will help you use Number Insight in your applications:
+
+* The [source code](https://github.com/Nexmo/sms-node-concat-tutorial) for this tutorial on GitHub
+* [SMS API product page](https://www.nexmo.com/products/sms)
+* [Inbound SMS Concept](/messaging/sms/guides/inbound-sms)
+* [Webhooks guide](/concepts/guides/webhooks)
+* [SMS API reference](/api/sms)
+* [Connect your local development server to the Nexmo API using an ngrok tunnel](https://www.nexmo.com/blog/2017/07/04/local-development-nexmo-ngrok-tunnel-dr/)
+* [More SMS API tutorials](/messaging/sms/tutorials)
